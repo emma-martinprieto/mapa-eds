@@ -1,0 +1,35 @@
+.mapa-usuarios table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--body-font-size-s);
+}
+
+.mapa-usuarios th,
+.mapa-usuarios td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #dadada;
+  text-align: left;
+}
+
+.mapa-usuarios th {
+  border-bottom-width: 2px;
+  background-color: var(--light-color);
+}
+
+.mapa-usuarios th:last-child,
+.mapa-usuarios td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mapa-usuarios .mapa-usuarios-updated {
+  margin: 0 0 12px;
+  color: var(--dark-color);
+  font-size: var(--body-font-size-xs);
+}
+
+.mapa-usuarios .mapa-usuarios-status {
+  margin: 0;
+  padding: 16px 0;
+}
