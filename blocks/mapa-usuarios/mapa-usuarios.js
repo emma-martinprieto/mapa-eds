@@ -263,43 +263,64 @@ function createView(block, lang) {
 /**
  * Fetches the data from the API.
  * @param {string} url API URL
- * @returns {Promise<{updatedAt: string, rows: Array}>} The data
+ * @returns {Promise<{updatedAt: string, rows: Array, sample: boolean}>} The data. "sample" marks
+ *   the example data the API returns when its backend is down
  */
 async function fetchData(url) {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  // The API's max-age is for the CDN: the browser's cache would hold back a refresh
+  const resp = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-  const { updated_at: updatedAt, data } = await resp.json();
+  const { updated_at: updatedAt, data, sample } = await resp.json();
   if (!Array.isArray(data)) throw new Error('Unexpected response: "data" is not an array');
-  return { updatedAt, rows: data };
+  return { updatedAt, rows: data, sample: sample === true };
 }
 
 export default function decorate(block) {
   const url = LOCAL_HOSTNAMES.includes(window.location.hostname) ? LOCAL_API_URL : API_URL;
   const lang = document.documentElement.lang || DEFAULT_LANG;
   let showData = null;
+  let timer = null;
+  let loading = false;
 
   block.replaceChildren(createParagraph('mapa-usuarios-status', 'Cargando datos…', 'status'));
 
   const refresh = async () => {
+    clearTimeout(timer);
     // A hidden tab doesn't ask for more data once it has some.
-    if (!showData || !document.hidden) {
-      try {
-        const result = await fetchData(url);
-        showData ??= createView(block, lang);
-        showData(result);
-      } catch (error) {
+    if (loading || (showData && document.hidden)) return;
+
+    loading = true;
+    try {
+      const result = await fetchData(url);
+      if (showData && result.sample) {
         // eslint-disable-next-line no-console
-        console.error('mapa-usuarios: failed to load data', error);
-        // A failed refresh keeps the last data on screen. A later one can still recover the block.
-        if (!showData) {
-          block.replaceChildren(createParagraph('mapa-usuarios-status', 'No se han podido cargar los datos.', 'alert'));
-        }
+        console.warn('mapa-usuarios: the API returned example data, keeping the last data');
+      } else {
+        // Assigned after showing it: if that fails, the catch below reports it on screen.
+        const view = showData ?? createView(block, lang);
+        view(result);
+        showData = view;
       }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error('mapa-usuarios: failed to load data', error);
+      // A failed refresh keeps the last data on screen. A later one can still recover the block.
+      if (!showData) {
+        block.replaceChildren(createParagraph('mapa-usuarios-status', 'No se han podido cargar los datos.', 'alert'));
+      }
+    } finally {
+      loading = false;
     }
-    // Scheduled after each response, so requests never overlap.
-    setTimeout(refresh, REFRESH_SECONDS * 1000);
+
+    // Scheduled after each response, so requests never overlap. While the tab is hidden there
+    // is no timer: the visibilitychange listener asks for data on return and resumes the cycle.
+    if (!document.hidden) timer = setTimeout(refresh, REFRESH_SECONDS * 1000);
   };
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh();
+  });
 
   // Not awaited on purpose: aem.js keeps the section hidden until decorate() resolves,
   // so awaiting would hide the loading message and hold back the following sections.
