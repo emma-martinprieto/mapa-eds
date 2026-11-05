@@ -4,6 +4,8 @@ const API_URL = '/api/usuarios-activos';
 const DEFAULT_LANG = 'es';
 const COLOR_STEPS = 5;
 const MAP_LOAD_MARGIN = '200px 0px';
+const REFRESH_SECONDS = 60;
+const FETCH_TIMEOUT_MS = 30000;
 
 function createParagraph(className, text, role) {
   const p = document.createElement('p');
@@ -160,101 +162,146 @@ function buildUpdatedAt(updatedAt, lang) {
 }
 
 /**
- * Loads and draws the map. If it fails, the table becomes the visible content.
- * @param {object} parts Elements around the map
- * @param {Element} parts.canvas Element that receives the map
- * @param {Element} parts.legend The legend
- * @param {HTMLDetailsElement} parts.tableDetails Disclosure holding the table
- * @param {object} options Options for renderMap
+ * Creates the block's view. It keeps the same canvas and disclosure across refreshes, so new
+ * data doesn't make the map flicker, lose its focus or close the table.
+ * @param {Element} block The block element
+ * @param {string} lang Locale
+ * @returns {function({updatedAt: string, rows: Array}): void} Shows a set of data
  */
-async function loadMap({ canvas, legend, tableDetails }, options) {
-  try {
-    const { default: renderMap } = await import('./mapa-usuarios-map.js');
-    const notDrawn = await renderMap(canvas, options);
-    if (notDrawn.length) {
-      const names = notDrawn.map(options.getCountryName).join(', ');
-      legend.after(createParagraph('mapa-usuarios-note', `Sin forma en el mapa (ver la tabla): ${names}.`));
-    }
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('mapa-usuarios: failed to load map', error);
-    canvas.replaceWith(createParagraph('mapa-usuarios-status', 'No se ha podido cargar el mapa.', 'alert'));
-    legend.remove();
-    tableDetails.open = true;
-  }
-}
-
-/**
- * Builds the map, legend and table, loading the map only when it approaches the viewport.
- * @param {Array<{country: string, active_users: number}>} rows API rows
- * @param {object} formatters Locale-aware formatters
- * @returns {Element[]} The elements to add to the block
- */
-function buildContent(rows, formatters) {
-  const values = new Map();
-  rows.forEach(({ country, active_users: activeUsers }) => {
-    if (country && Number.isFinite(activeUsers) && activeUsers >= 0) {
-      values.set(String(country).toUpperCase(), activeUsers);
-    }
-  });
-  const scale = values.size ? buildScale([...values.values()]) : null;
+function createView(block, lang) {
+  const formatters = createFormatters(lang);
 
   const canvas = document.createElement('div');
   canvas.className = 'mapa-usuarios-canvas';
   canvas.append(createParagraph('mapa-usuarios-status', 'Cargando mapa…', 'status'));
 
-  const legend = buildLegend(scale, formatters.formatNumber);
-
   const tableDetails = document.createElement('details');
   tableDetails.className = 'mapa-usuarios-details';
   const summary = document.createElement('summary');
   summary.textContent = 'Ver como tabla';
-  tableDetails.append(summary, buildTable(rows, formatters));
+  tableDetails.append(summary);
 
-  const observer = new IntersectionObserver((entries) => {
-    if (!entries.some((entry) => entry.isIntersecting)) return;
-    observer.disconnect();
-    loadMap({ canvas, legend, tableDetails }, {
+  let updated = null;
+  let legend = null;
+  let table = null;
+  let note = null;
+  let mapOptions = null;
+  let updateMap = null;
+  let mapFailed = false;
+
+  const paintMap = () => {
+    if (!updateMap) return;
+    const notDrawn = updateMap(mapOptions);
+    note?.remove();
+    note = null;
+    if (notDrawn.length) {
+      const names = notDrawn.map(formatters.getCountryName).join(', ');
+      note = createParagraph('mapa-usuarios-note', `Sin forma en el mapa (ver la tabla): ${names}.`);
+      legend.after(note);
+    }
+  };
+
+  // Loads the map only when it approaches the viewport. If it fails, the table takes its place.
+  const loadMap = async () => {
+    try {
+      const { default: renderMap } = await import('./mapa-usuarios-map.js');
+      updateMap = await renderMap(canvas);
+      paintMap();
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error('mapa-usuarios: failed to load map', error);
+      mapFailed = true;
+      updateMap = null;
+      canvas.replaceWith(createParagraph('mapa-usuarios-status', 'No se ha podido cargar el mapa.', 'alert'));
+      legend.remove();
+      tableDetails.open = true;
+    }
+  };
+
+  return ({ updatedAt, rows }) => {
+    const values = new Map();
+    rows.forEach(({ country, active_users: activeUsers }) => {
+      if (country && Number.isFinite(activeUsers) && activeUsers >= 0) {
+        values.set(String(country).toUpperCase(), activeUsers);
+      }
+    });
+    const scale = values.size ? buildScale([...values.values()]) : null;
+    mapOptions = {
       values,
       getStep: scale ? scale.getStep : () => COLOR_STEPS,
       ...formatters,
-    });
-  }, { rootMargin: MAP_LOAD_MARGIN });
-  observer.observe(canvas);
+    };
 
-  return [canvas, legend, tableDetails];
+    const newUpdated = buildUpdatedAt(updatedAt, lang);
+    const newLegend = buildLegend(scale, formatters.formatNumber);
+    const newTable = buildTable(rows, formatters);
+
+    if (!table) {
+      tableDetails.append(newTable);
+      block.replaceChildren(...(newUpdated ? [newUpdated] : []), canvas, newLegend, tableDetails);
+
+      const observer = new IntersectionObserver((entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        loadMap();
+      }, { rootMargin: MAP_LOAD_MARGIN });
+      observer.observe(canvas);
+    } else {
+      table.replaceWith(newTable);
+      if (!mapFailed) legend.replaceWith(newLegend);
+      updated?.remove();
+      if (newUpdated) block.prepend(newUpdated);
+    }
+
+    updated = newUpdated;
+    legend = newLegend;
+    table = newTable;
+    paintMap();
+  };
 }
 
 /**
- * Fetches the data and replaces the block content with the result.
- * @param {Element} block The block element
+ * Fetches the data from the API.
  * @param {string} url API URL
+ * @returns {Promise<{updatedAt: string, rows: Array}>} The data
  */
-async function loadData(block, url) {
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+async function fetchData(url) {
+  const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-    const { updated_at: updatedAt, data } = await resp.json();
-    if (!Array.isArray(data)) throw new Error('Unexpected response: "data" is not an array');
-
-    const lang = document.documentElement.lang || DEFAULT_LANG;
-    const updated = buildUpdatedAt(updatedAt, lang);
-    const content = buildContent(data, createFormatters(lang));
-    block.replaceChildren(...(updated ? [updated] : []), ...content);
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('mapa-usuarios: failed to load data', error);
-    block.replaceChildren(createParagraph('mapa-usuarios-status', 'No se han podido cargar los datos.', 'alert'));
-  }
+  const { updated_at: updatedAt, data } = await resp.json();
+  if (!Array.isArray(data)) throw new Error('Unexpected response: "data" is not an array');
+  return { updatedAt, rows: data };
 }
 
 export default function decorate(block) {
   const url = LOCAL_HOSTNAMES.includes(window.location.hostname) ? LOCAL_API_URL : API_URL;
+  const lang = document.documentElement.lang || DEFAULT_LANG;
+  let showData = null;
 
   block.replaceChildren(createParagraph('mapa-usuarios-status', 'Cargando datos…', 'status'));
 
+  const refresh = async () => {
+    // A hidden tab doesn't ask for more data once it has some.
+    if (!showData || !document.hidden) {
+      try {
+        const result = await fetchData(url);
+        showData ??= createView(block, lang);
+        showData(result);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('mapa-usuarios: failed to load data', error);
+        // A failed refresh keeps the last data on screen. A later one can still recover the block.
+        if (!showData) {
+          block.replaceChildren(createParagraph('mapa-usuarios-status', 'No se han podido cargar los datos.', 'alert'));
+        }
+      }
+    }
+    // Scheduled after each response, so requests never overlap.
+    setTimeout(refresh, REFRESH_SECONDS * 1000);
+  };
+
   // Not awaited on purpose: aem.js keeps the section hidden until decorate() resolves,
   // so awaiting would hide the loading message and hold back the following sections.
-  loadData(block, url);
+  refresh();
 }

@@ -92,18 +92,15 @@ function addInteraction(canvas, svg, countries) {
 }
 
 /**
- * Draws the world map inside the canvas.
+ * Draws the world map inside the canvas, once. New data goes through the returned function, so
+ * refreshing the data neither downloads the map again nor adds more listeners.
  * @param {Element} canvas Element that receives the map
- * @param {object} options Map options
- * @param {Map<string, number>} options.values Active users per alpha-2 code
- * @param {function(number): number} options.getStep Color step for a value
- * @param {function(string): string} options.getCountryName Translated name for an alpha-2 code
- * @param {function(number): string} options.formatNumber Number formatter
- * @returns {Promise<string[]>} Alpha-2 codes with data that have no shape on the map
+ * @returns {Promise<function(object): string[]>} Paints the map with its options:
+ *   values (Map of active users per alpha-2 code), getStep (color step for a value),
+ *   getCountryName (translated name for an alpha-2 code) and formatNumber. It returns the
+ *   alpha-2 codes with data that have no shape on the map.
  */
-export default async function renderMap(canvas, {
-  values, getStep, getCountryName, formatNumber,
-}) {
+export default async function renderMap(canvas) {
   const [{ geoEqualEarth, geoPath }, { feature }, topology] = await Promise.all([
     import(D3_GEO_URL),
     import(TOPOJSON_CLIENT_URL),
@@ -122,39 +119,55 @@ export default async function renderMap(canvas, {
   svg.setAttribute('aria-label', 'Mapamundi de usuarios activos por país');
 
   const countries = new WeakMap();
-  const drawn = new Set();
+  const shapes = [];
 
   features.forEach((country) => {
     const d = path(country);
     if (!d) return;
 
-    const code = getAlpha2(country);
-    const countryName = code ? getCountryName(code) : country.properties.name;
-    const hasData = values.has(code);
-
     const shape = document.createElementNS(SVG_NS, 'path');
     shape.setAttribute('d', d);
-    countries.set(shape, {
-      name: countryName,
-      detail: hasData ? `Usuarios activos: ${formatNumber(values.get(code))}` : 'Sin datos',
-    });
-
-    if (hasData) {
-      drawn.add(code);
-      const step = getStep(values.get(code));
-      shape.setAttribute('class', `mapa-usuarios-country mapa-usuarios-step-${step}`);
-      shape.setAttribute('role', 'img');
-      shape.setAttribute('aria-label', `${countryName}: ${formatNumber(values.get(code))} usuarios activos`);
-      shape.setAttribute('tabindex', '0');
-    } else {
-      shape.setAttribute('class', 'mapa-usuarios-country');
-      shape.setAttribute('aria-hidden', 'true');
-    }
+    shapes.push({ shape, code: getAlpha2(country), sourceName: country.properties.name });
     svg.append(shape);
   });
 
   canvas.replaceChildren(svg);
+
+  const update = ({
+    values, getStep, getCountryName, formatNumber,
+  }) => {
+    const drawn = new Set();
+
+    shapes.forEach(({ shape, code, sourceName }) => {
+      const countryName = code ? getCountryName(code) : sourceName;
+      const hasData = values.has(code);
+
+      countries.set(shape, {
+        name: countryName,
+        detail: hasData ? `Usuarios activos: ${formatNumber(values.get(code))}` : 'Sin datos',
+      });
+
+      if (hasData) {
+        drawn.add(code);
+        const step = getStep(values.get(code));
+        shape.setAttribute('class', `mapa-usuarios-country mapa-usuarios-step-${step}`);
+        shape.setAttribute('role', 'img');
+        shape.setAttribute('aria-label', `${countryName}: ${formatNumber(values.get(code))} usuarios activos`);
+        shape.setAttribute('tabindex', '0');
+        shape.removeAttribute('aria-hidden');
+      } else {
+        shape.setAttribute('class', 'mapa-usuarios-country');
+        shape.setAttribute('aria-hidden', 'true');
+        shape.removeAttribute('role');
+        shape.removeAttribute('aria-label');
+        shape.removeAttribute('tabindex');
+      }
+    });
+
+    return [...values.keys()].filter((code) => !drawn.has(code));
+  };
+
   addInteraction(canvas, svg, countries);
 
-  return [...values.keys()].filter((code) => !drawn.has(code));
+  return update;
 }
