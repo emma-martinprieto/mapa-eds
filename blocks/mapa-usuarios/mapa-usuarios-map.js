@@ -101,7 +101,7 @@ function addInteraction(canvas, svg, countries) {
  *   alpha-2 codes with data that have no shape on the map.
  */
 export default async function renderMap(canvas) {
-  const [{ geoEqualEarth, geoPath }, { feature }, topology] = await Promise.all([
+  const [{ geoNaturalEarth1, geoPath }, { feature }, topology] = await Promise.all([
     import(D3_GEO_URL),
     import(TOPOJSON_CLIENT_URL),
     fetchTopology(),
@@ -110,7 +110,9 @@ export default async function renderMap(canvas) {
   const features = feature(topology, topology.objects.countries).features
     .filter(({ id }) => id !== ANTARCTICA_ID);
   const collection = { type: 'FeatureCollection', features };
-  const path = geoPath(geoEqualEarth().fitWidth(MAP_WIDTH, collection)).digits(1);
+  // Natural Earth curves the meridians less than Equal Earth, so countries near the edges
+  // (Australia, Chile, Greenland) look less tilted. No rotation: centred on Greenwich.
+  const path = geoPath(geoNaturalEarth1().fitWidth(MAP_WIDTH, collection)).digits(1);
   const height = Math.ceil(path.bounds(collection)[1][1]);
 
   const svg = document.createElementNS(SVG_NS, 'svg');

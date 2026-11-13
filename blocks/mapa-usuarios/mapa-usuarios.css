@@ -36,7 +36,7 @@
 /* Map: the aspect ratio reserves its space before it loads */
 .mapa-usuarios .mapa-usuarios-canvas {
   position: relative;
-  aspect-ratio: 960 / 429;
+  aspect-ratio: 960 / 427;
 }
 
 .mapa-usuarios .mapa-usuarios-canvas svg {
