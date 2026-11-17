@@ -1,7 +1,7 @@
 /*
  * comunidad-mapa "datos" mode: one point per country of the ranking. The first four pulse
  * (ring-a + ring-b + dot-center), the rest are static. Each point is a button with a tooltip
- * (country name and active users); lines go from Madrid to the pulsing countries.
+ * (country name and active users); lines go from Madrid to the first countries of the ranking.
  */
 import { countryPosition, toMapPercent } from './comunidad-mapa-geo.js';
 
@@ -13,6 +13,77 @@ const LINE_STAGGER = 0.3;
 const MADRID = [40.4, -3.7];
 const TOOLTIP_GAP = 8;
 const EDGE_GAP = 4;
+const RESIZE_DELAY = 200;
+
+/* Line curves */
+
+// Candidate curvatures, as a fraction of the line length, in order of preference.
+// Negative bends towards the top of the map (like flight routes), positive towards the bottom.
+const CURVE_BENDS = [-0.18, 0.18, -0.1, 0.1, -0.28, 0.28];
+const CURVE_SAMPLES = 24;
+// Lines share their start (Madrid): crossings that close to it do not count
+const CROSSING_START = 0.15;
+// Space kept around the live card and the title, in pixels
+const OBSTACLE_MARGIN = 12;
+
+const quadPoint = (from, control, to, t) => {
+  const u = 1 - t;
+  return [0, 1].map((k) => u * u * from[k] + 2 * u * t * control[k] + t * t * to[k]);
+};
+
+const sampleCurve = (from, control, to) => Array.from(
+  { length: CURVE_SAMPLES + 1 },
+  (_, i) => quadPoint(from, control, to, i / CURVE_SAMPLES),
+);
+
+const orientation = (a, b, c) => Math.sign(
+  (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]),
+);
+const segmentsCross = (a, b, c, d) => orientation(a, b, c) !== orientation(a, b, d)
+  && orientation(c, d, a) !== orientation(c, d, b);
+
+function countCrossings(first, second) {
+  const start = Math.ceil(CURVE_SAMPLES * CROSSING_START);
+  let crossings = 0;
+  for (let i = start; i < first.length - 1; i += 1) {
+    for (let j = start; j < second.length - 1; j += 1) {
+      if (segmentsCross(first[i], first[i + 1], second[j], second[j + 1])) crossings += 1;
+    }
+  }
+  return crossings;
+}
+
+/**
+ * Chooses the curve of a line: the preferred curvature that does not run under the obstacles
+ * and crosses the fewest of the lines already drawn.
+ * @param {number[]} from Start, in line-layer units
+ * @param {number[]} to End, in line-layer units
+ * @param {{x0: number, x1: number, y0: number, y1: number}[]} obstacles Boxes to avoid
+ * @param {number[][][]} others Sampled curves of the other lines
+ * @returns {{control: number[], points: number[][]}} Control point and sampled curve
+ */
+function chooseCurve(from, to, obstacles, others) {
+  const length = Math.hypot(to[0] - from[0], to[1] - from[1]) || 1;
+  // Unit normal pointing to the bottom of the map
+  let nx = -(to[1] - from[1]) / length;
+  let ny = (to[0] - from[0]) / length;
+  if (ny < 0) { nx = -nx; ny = -ny; }
+
+  let best = null;
+  CURVE_BENDS.forEach((bend, preference) => {
+    const control = [
+      (from[0] + to[0]) / 2 + nx * bend * length,
+      (from[1] + to[1]) / 2 + ny * bend * length,
+    ];
+    const points = sampleCurve(from, control, to);
+    const hidden = points.filter(([x, y]) => obstacles
+      .some((box) => x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1)).length;
+    const crossings = others.reduce((total, other) => total + countCrossings(points, other), 0);
+    const score = hidden * 100 + crossings * 10 + preference;
+    if (!best || score < best.score) best = { score, control, points };
+  });
+  return best;
+}
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const formatUsers = (value) => Math.round(value).toLocaleString('es-ES');
@@ -69,10 +140,13 @@ function rank(rows, maxPoints) {
  * @param {Element} parts.map Map element (holds the points)
  * @param {SVGSVGElement} parts.lines Lines layer
  * @param {number} parts.maxPoints Maximum number of points
+ * @param {number} parts.maxLines Maximum number of lines from Madrid
+ * @param {{element: Element, text: boolean}[]} parts.obstacles What the lines must not run
+ *   under: the element's box, or only its text when text is true
  * @returns {{update: function(object[]): number}} Updates the points; returns how many it shows
  */
 export default function createPoints({
-  viewport, map, lines, maxPoints,
+  viewport, map, lines, maxPoints, maxLines, obstacles,
 }) {
   const startTime = performance.now();
   const lang = document.documentElement.lang || 'es';
@@ -91,7 +165,6 @@ export default function createPoints({
   };
 
   const points = new Map();
-  let linesKey = '';
   let active = null;
 
   /* Tooltip */
@@ -185,32 +258,86 @@ export default function createPoints({
     return button;
   };
 
-  /* Lines from Madrid to the pulsing countries */
-  const updateLines = (ranking) => {
-    const targets = ranking.filter(({ pulse, code }) => pulse && code !== 'ES');
-    const key = targets.map(({ code }) => code).join(',');
-    if (key === linesKey) return;
-    linesKey = key;
+  /* Lines from Madrid to the first countries of the ranking (Spain excluded) */
+  const { width: boxWidth, height: boxHeight } = lines.viewBox.baseVal;
+  const toBox = ([x, y]) => [(x / 100) * boxWidth, (y / 100) * boxHeight];
+  const origin = toBox(toMapPercent(...MADRID, false));
+  const linesByCode = new Map();
 
-    lines.querySelectorAll('.comunidad-mapa-line').forEach(fadeOut);
-    const { width, height } = lines.viewBox.baseVal;
-    const toBox = ([x, y]) => [(x / 100) * width, (y / 100) * height];
-    const [x1, y1] = toBox(toMapPercent(...MADRID, false));
-    const added = targets.map(({ position }, i) => {
-      const [x2, y2] = toBox(position);
-      const lift = Math.hypot(x2 - x1, y2 - y1) * 0.2;
-      const cx = (x1 + x2) / 2;
-      const cy = Math.min(y1, y2) - lift;
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', `M${x1.toFixed(1)} ${y1.toFixed(1)}Q${cx.toFixed(1)} ${cy.toFixed(1)} ${x2.toFixed(1)} ${y2.toFixed(1)}`);
-      path.setAttribute('pathLength', '1');
-      path.setAttribute('class', `comunidad-mapa-line is-new${i === 0 ? ' comunidad-mapa-line-strong' : ''}`);
-      path.style.setProperty('--line-delay', `${(i * LINE_STAGGER).toFixed(1)}s`);
-      lines.append(path);
-      return path;
+  // Obstacles in line-layer units, from their current place on screen. Text obstacles use the
+  // box of each line of text, not the element, which has empty space around the words.
+  const obstacleRects = ({ element, text }) => {
+    if (!text) return [element.getBoundingClientRect()];
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return [...range.getClientRects()];
+  };
+  const obstacleBoxes = () => {
+    const area = map.getBoundingClientRect();
+    if (!area.width || !area.height) return [];
+    const sx = boxWidth / area.width;
+    const sy = boxHeight / area.height;
+    return obstacles.flatMap(obstacleRects)
+      .filter((rect) => rect.width && rect.height)
+      .map((rect) => ({
+        x0: (rect.left - area.left - OBSTACLE_MARGIN) * sx,
+        x1: (rect.right - area.left + OBSTACLE_MARGIN) * sx,
+        y0: (rect.top - area.top - OBSTACLE_MARGIN) * sy,
+        y1: (rect.bottom - area.top + OBSTACLE_MARGIN) * sy,
+      }));
+  };
+
+  const drawCurve = (line, boxes, others) => {
+    const to = toBox(line.entry.position);
+    const { control, points: curve } = chooseCurve(origin, to, boxes, others);
+    const f = (v) => v.toFixed(1);
+    line.path.setAttribute('d', `M${f(origin[0])} ${f(origin[1])}Q${f(control[0])} ${f(control[1])} ${f(to[0])} ${f(to[1])}`);
+    line.curve = curve;
+  };
+
+  const updateLines = (ranking) => {
+    const targets = ranking.filter(({ code }) => code !== 'ES').slice(0, maxLines);
+    const wanted = new Set(targets.map(({ code }) => code));
+    linesByCode.forEach((line, code) => {
+      if (wanted.has(code)) return;
+      fadeOut(line.path);
+      linesByCode.delete(code);
+    });
+
+    // Lines that stay keep their curve; new ones avoid them, the card and the title
+    const boxes = obstacleBoxes();
+    const added = [];
+    targets.forEach((entry, i) => {
+      let line = linesByCode.get(entry.code);
+      if (!line) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('pathLength', '1');
+        path.setAttribute('class', 'comunidad-mapa-line is-new');
+        path.style.setProperty('--line-delay', `${(added.length * LINE_STAGGER).toFixed(1)}s`);
+        line = { path, entry };
+        drawCurve(line, boxes, [...linesByCode.values()].map(({ curve }) => curve));
+        linesByCode.set(entry.code, line);
+        lines.append(path);
+        added.push(path);
+      }
+      line.path.classList.toggle('comunidad-mapa-line-strong', i === 0);
     });
     nextFrame(() => added.forEach((path) => path.classList.remove('is-new')));
   };
+
+  // The card and the title move with the layout: choose the curves again, without redrawing
+  let resizeTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const boxes = obstacleBoxes();
+      const done = [];
+      linesByCode.forEach((line) => {
+        drawCurve(line, boxes, done.map(({ curve }) => curve));
+        done.push(line);
+      });
+    }, RESIZE_DELAY);
+  });
 
   return {
     update(rows) {

@@ -51,6 +51,7 @@ const DEFAULTS = {
   'stat-3': '+1.5M | Beneficios | Disfrutados',
   puntos: 'fijos',
   'max-puntos': '12',
+  lineas: '6',
   refresco: '10',
 };
 const MAX_POINTS_LIMIT = 40;
@@ -124,6 +125,12 @@ function parseNumber(value) {
 function parseMax(value) {
   const max = Number.parseInt(value, 10);
   return max > 0 ? Math.min(max, MAX_POINTS_LIMIT) : Number.parseInt(DEFAULTS['max-puntos'], 10);
+}
+
+// "Lineas": 0 or more; anything that is not a number falls back to the default
+function parseLines(value) {
+  const lines = Number.parseInt(value, 10);
+  return lines >= 0 ? Math.min(lines, MAX_POINTS_LIMIT) : Number.parseInt(DEFAULTS.lineas, 10);
 }
 
 const isOn = (value) => ['si', 'sí', 'yes', 'true', '1', 'on'].includes(String(value).trim().toLowerCase());
@@ -505,7 +512,8 @@ export default function decorate(block) {
   const intro = el('div', 'comunidad-mapa-intro');
   const subtitle = el('p', 'comunidad-mapa-subtitle reveal', config.subtitulo);
   subtitle.dataset.d = '2';
-  intro.append(buildTitle(config), subtitle);
+  const title = buildTitle(config);
+  intro.append(title, subtitle);
 
   const { card, count } = buildLiveCard();
   const dataMode = toKey(config.puntos) === 'datos';
@@ -537,7 +545,17 @@ export default function decorate(block) {
     ? Promise.all([import('./comunidad-mapa-points.js'), dataLoaded])
       .then(([{ default: createPoints }, { rows }]) => {
         points = createPoints({
-          viewport: map, map: mapInner, lines, maxPoints: parseMax(config['max-puntos']),
+          viewport: map,
+          map: mapInner,
+          lines,
+          maxPoints: parseMax(config['max-puntos']),
+          maxLines: parseLines(config.lineas),
+          // Lines must not run under the live card (opaque box) or the title and subtitle text
+          obstacles: [
+            { element: card },
+            { element: title, text: true },
+            { element: subtitle, text: true },
+          ],
         });
         if (!rows || !points.update(rows)) throw new Error('No country of the data can be placed');
       })

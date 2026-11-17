@@ -247,8 +247,10 @@ main > .section > .comunidad-mapa-wrapper {
 
 /* "Datos" mode: points from the data, with tooltip */
 
-/* clip, unlike hidden, cannot be scrolled when a point outside the mobile crop gets focus */
+/* clip, unlike hidden, cannot be scrolled when a point outside the mobile crop gets focus.
+   z-index 0 keeps the points and lines under the live card and the title. */
 .comunidad-mapa .comunidad-mapa-viewport.is-data {
+  z-index: 0;
   overflow: clip;
 }
 
