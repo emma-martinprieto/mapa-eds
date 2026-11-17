@@ -13,15 +13,28 @@ const DEFAULT_ITEMS = 10;
 const MAX_ITEMS = 25; // API limit for rpp
 const ROWS_PER_PAGE = 10; // API limit for bpp
 const MAX_SECTION_PAGES = 5;
-// The image host serves resized copies when "original" in the URL is replaced by a size
-const IMAGE_SIZE = '640x360';
+// The image host serves resized copies when "original" in the URL is replaced by WIDTHxHEIGHT.
+// It crops from the centre to that exact size, so each field is asked in its own orientation,
+// horizontal ones first: playlists bring a horizontal coverUrl and a portrait smallCoverUrl.
+const IMAGE_FIELDS = [
+  { field: 'thumbnailUrl', size: '640x360' },
+  { field: 'coverUrl', size: '640x360' },
+  { field: 'smallCoverUrl', size: '480x640' },
+];
+// Images narrower than this are shown whole over a blurred copy instead of cropped
+const MIN_COVER_RATIO = 1.5;
 
 const PATH_BY_TYPE = { VOD: 'interstitial', LIVE: 'live', PLAYLIST: 'playlist' };
 const ACCESS_LABELS = {
   DENIED: 'Suscríbete para verlo',
   GRANTED_ON_SIGN_IN: 'Inicia sesión para verlo',
   GRANTED_ON_SIGN: 'Inicia sesión para verlo',
-  GRANTED: 'Ver ahora',
+  // RM Play also asks for an account for these
+  GRANTED: 'Ver en RM Play',
+};
+const ICON_PATHS = {
+  lock: 'M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z',
+  play: 'M8 5.5v13a1 1 0 0 0 1.5.86l11-6.5a1 1 0 0 0 0-1.72l-11-6.5A1 1 0 0 0 8 5.5Z',
 };
 const UTM_PARAMS = { utm_source: 'realmadrid.com', utm_medium: 'landing' };
 
@@ -197,52 +210,98 @@ function getCardUrl({ type, id }, campaign) {
   return url.href;
 }
 
-function createLockIcon() {
+function createIcon(name, className) {
   const svgNs = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNs, 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
   svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('class', 'rmplay-content-lock');
+  svg.setAttribute('class', className);
   const path = document.createElementNS(svgNs, 'path');
-  path.setAttribute('d', 'M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z');
+  path.setAttribute('d', ICON_PATHS[name]);
   svg.append(path);
   return svg;
 }
 
-function createImage(item) {
-  // Playlists come with cover images instead of a thumbnail
-  const original = item.thumbnailUrl || item.smallCoverUrl || item.coverUrl;
-  if (!original) return null;
+/**
+ * Formats a duration in seconds as m:ss or h:mm:ss.
+ * @param {number} seconds Duration
+ * @returns {string} Formatted duration, or an empty string if there is none
+ */
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+/**
+ * Creates the card image from the first available field, resized in that field's orientation.
+ * When the image is not horizontal enough to fill 16:9, it is shown whole over a blurred copy.
+ * @param {object} item Content item
+ * @param {Element} media Image container
+ * @returns {HTMLImageElement|null} The image
+ */
+function createImage(item, media) {
+  const source = IMAGE_FIELDS.find(({ field }) => item[field]);
+  if (!source) return null;
+  const original = item[source.field];
 
   const img = document.createElement('img');
   img.loading = 'lazy';
   img.alt = item.title || '';
   img.width = 640;
   img.height = 360;
-  const resized = original.replace('/original/', `/${IMAGE_SIZE}/`);
+  const resized = original.replace('/original/', `/${source.size}/`);
   if (resized !== original) {
     img.addEventListener('error', () => { img.src = original; }, { once: true });
   }
+  img.addEventListener('load', () => {
+    if (img.naturalWidth / img.naturalHeight >= MIN_COVER_RATIO) return;
+    media.style.setProperty('--rmplay-content-backdrop', `url("${img.currentSrc.replaceAll('"', '%22')}")`);
+    media.classList.add('rmplay-content-media-contain');
+  });
   img.src = resized;
   return img;
+}
+
+function createMedia(item) {
+  const media = createElement('div', 'rmplay-content-media');
+  const img = createImage(item, media);
+  if (img) media.append(img);
+
+  const play = createElement('span', 'rmplay-content-play');
+  play.append(createIcon('play', 'rmplay-content-icon'));
+  media.append(play);
+
+  if (item.type === 'PLAYLIST') {
+    media.append(createElement('span', 'rmplay-content-badge rmplay-content-badge-type', 'Playlist'));
+  }
+  if (item.accessLevel === 'DENIED') {
+    const lock = createElement('span', 'rmplay-content-badge rmplay-content-badge-lock');
+    lock.append(createIcon('lock', 'rmplay-content-icon'));
+    media.append(lock);
+  }
+  const duration = formatDuration(item.duration);
+  if (duration) {
+    media.append(createElement('span', 'rmplay-content-badge rmplay-content-badge-duration', duration));
+  }
+  return media;
 }
 
 function createCard(item, campaign) {
   const link = createElement('a', 'rmplay-content-card');
   link.href = getCardUrl(item, campaign);
 
-  const media = createElement('div', 'rmplay-content-media');
-  const img = createImage(item);
-  if (img) media.append(img);
-  link.append(media, createElement('span', 'rmplay-content-title', item.title));
-
+  const body = createElement('div', 'rmplay-content-body');
+  body.append(createElement('span', 'rmplay-content-title', item.title));
   const label = ACCESS_LABELS[item.accessLevel];
   if (label) {
-    const access = createElement('span', `rmplay-content-access rmplay-content-access-${item.accessLevel.toLowerCase().replaceAll('_', '-')}`);
-    if (item.accessLevel === 'DENIED') access.append(createLockIcon());
-    access.append(label);
-    link.append(access);
+    const variant = item.accessLevel === 'DENIED' ? 'subscribe' : 'account';
+    body.append(createElement('span', `rmplay-content-access rmplay-content-access-${variant}`, label));
   }
+  link.append(createMedia(item), body);
 
   const li = document.createElement('li');
   li.append(link);
