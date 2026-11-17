@@ -49,7 +49,11 @@ const DEFAULTS = {
   'stat-1': '21M+ | Madridistas | en todo el mundo',
   'stat-2': '+ 150 | Países Unidos | En un mismo sentimiento',
   'stat-3': '+1.5M | Beneficios | Disfrutados',
+  puntos: 'fijos',
+  'max-puntos': '12',
+  refresco: '10',
 };
+const MAX_POINTS_LIMIT = 40;
 
 // Material Icons (Apache License 2.0), 24x24
 const STAT_ICONS = [
@@ -117,40 +121,55 @@ function parseNumber(value) {
   return digits ? Number(digits) : NaN;
 }
 
+function parseMax(value) {
+  const max = Number.parseInt(value, 10);
+  return max > 0 ? Math.min(max, MAX_POINTS_LIMIT) : Number.parseInt(DEFAULTS['max-puntos'], 10);
+}
+
 const isOn = (value) => ['si', 'sí', 'yes', 'true', '1', 'on'].includes(String(value).trim().toLowerCase());
 
 /* Live counter */
 
 /**
- * Sums active_users from the JSON. Accepts { data: [...] } and EDS sheets, including
- * multi-sheet files (first sheet) and numbers stored as text.
+ * Reads the rows of the JSON. Accepts { data: [...] } and EDS sheets, including multi-sheet
+ * files (first sheet).
  * @param {string} url JSON URL
- * @returns {Promise<number>} Total active users
+ * @param {boolean} fresh Skip the browser cache (refreshes)
+ * @returns {Promise<object[]>} Rows
  */
-async function fetchTotal(url) {
-  const resp = await fetch(url);
+async function fetchRows(url, fresh = false) {
+  const resp = await fetch(url, fresh ? { cache: 'no-store' } : undefined);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const json = await resp.json();
   const sheet = Array.isArray(json.data) ? json : json[(json[':names'] || [])[0]];
   const rows = sheet && Array.isArray(sheet.data) ? sheet.data : null;
   if (!rows) throw new Error('Unexpected JSON: no "data" array');
-  return rows.reduce((total, row) => {
-    const value = Number(row && row.active_users);
-    return Number.isFinite(value) ? total + value : total;
-  }, 0);
+  return rows;
 }
 
-async function getCount({ datos, respaldo }) {
+// Sums active_users, which EDS sheets store as text
+const sumRows = (rows) => rows.reduce((total, row) => {
+  const value = Number(row && row.active_users);
+  return Number.isFinite(value) ? total + value : total;
+}, 0);
+
+/**
+ * First load: the rows from "Datos" or, if that fails, the "Respaldo" number.
+ * @param {object} config Block configuration
+ * @returns {Promise<{total: number|null, rows: object[]|null}>} Data
+ */
+async function loadData({ datos, respaldo }) {
   const fallback = parseNumber(respaldo);
   if (datos) {
     try {
-      return await fetchTotal(datos);
+      const rows = await fetchRows(datos);
+      return { total: sumRows(rows), rows };
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('comunidad-mapa: failed to load the counter data, using the fallback', error);
     }
   }
-  return Number.isFinite(fallback) ? fallback : null;
+  return { total: Number.isFinite(fallback) ? fallback : null, rows: null };
 }
 
 const formatCount = (value) => Math.round(value).toLocaleString('es-ES');
@@ -171,55 +190,92 @@ function easeOut(t) {
   return bezier(Math.min(Math.max(u, 0), 1), y1, y2);
 }
 
-function animateCount(element, target) {
-  return new Promise((resolve) => {
-    element.setAttribute('aria-busy', 'true');
-    const start = performance.now();
-    const frame = (now) => {
-      const t = Math.min((now - start) / COUNT_DURATION, 1);
-      element.textContent = formatCount(target * easeOut(t));
-      if (t < 1) {
-        requestAnimationFrame(frame);
-      } else {
-        element.removeAttribute('aria-busy');
-        resolve();
-      }
-    };
-    requestAnimationFrame(frame);
-  });
-}
-
-function simulateLive(element, initial) {
-  let value = initial;
-  // The first value is announced; announcing every second would flood screen readers
-  element.setAttribute('aria-live', 'off');
-  setInterval(() => {
-    value += 1 + Math.floor(Math.random() * 5);
-    element.textContent = formatCount(value);
-  }, SIMULATION_INTERVAL);
-}
-
 /**
- * Shows the counter once the card is visible: 400 ms later it counts from 0 to the value.
+ * Live counter. The first value counts up from 0, 400 ms after the card is visible; later
+ * values (refreshes) count from the value on screen. "Simular directo" adds 1-5 every second
+ * on top of the last real value.
  * @param {Element} count Number element
- * @param {Promise<void>} cardVisible Resolves when the card enters the viewport
- * @param {object} config Block configuration
+ * @param {boolean} simulate Whether to simulate live increments
+ * @returns {{set: function(number|null): void, start: function(): Promise<void>}} Controller
  */
-async function startCounter(count, cardVisible, config) {
-  const [value] = await Promise.all([getCount(config), cardVisible]);
-  if (value === null) {
-    count.hidden = true;
-    return;
-  }
-  count.classList.remove('is-pending');
-  if (reducedMotion()) {
+function createCounter(count, simulate) {
+  let target = null;
+  let shown = 0;
+  let ready = false;
+  let started = false;
+  let frame = 0;
+  let animating = false;
+  let finishAnimation = () => {};
+
+  const render = (value) => {
+    shown = value;
     count.textContent = formatCount(value);
-  } else {
-    count.textContent = formatCount(0);
-    await new Promise((resolve) => { setTimeout(resolve, COUNT_START_DELAY); });
-    await animateCount(count, value);
-  }
-  if (isOn(config['simular-directo'])) simulateLive(count, value);
+  };
+
+  const animateTo = (to) => {
+    cancelAnimationFrame(frame);
+    finishAnimation();
+    const from = shown;
+    if (reducedMotion() || from === to) {
+      render(to);
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      animating = true;
+      count.setAttribute('aria-busy', 'true');
+      finishAnimation = () => {
+        animating = false;
+        count.removeAttribute('aria-busy');
+        finishAnimation = () => {};
+        resolve();
+      };
+      const start = performance.now();
+      const step = (now) => {
+        const t = Math.min((now - start) / COUNT_DURATION, 1);
+        render(from + (to - from) * easeOut(t));
+        if (t < 1) frame = requestAnimationFrame(step);
+        else finishAnimation();
+      };
+      frame = requestAnimationFrame(step);
+    });
+  };
+
+  const startSimulation = () => {
+    // The first value is announced; announcing every second would flood screen readers
+    count.setAttribute('aria-live', 'off');
+    setInterval(() => {
+      if (!animating) render(shown + 1 + Math.floor(Math.random() * 5));
+    }, SIMULATION_INTERVAL);
+  };
+
+  const start = async () => {
+    ready = true;
+    if (target === null) {
+      count.hidden = true;
+      return;
+    }
+    started = true;
+    count.hidden = false;
+    count.classList.remove('is-pending');
+    if (reducedMotion()) {
+      render(target);
+    } else {
+      render(0);
+      await new Promise((resolve) => { setTimeout(resolve, COUNT_START_DELAY); });
+      await animateTo(target);
+    }
+    if (simulate) startSimulation();
+  };
+
+  return {
+    set(value) {
+      if (value === null) return;
+      target = value;
+      if (started) animateTo(value);
+      else if (ready) start();
+    },
+    start,
+  };
 }
 
 /* Map */
@@ -235,29 +291,60 @@ function placeDot(dot, at) {
   dot.style.top = `${top.toFixed(2)}%`;
 }
 
-function buildLines() {
-  const svg = svgEl('svg', {
-    class: 'comunidad-mapa-lines',
-    viewBox: `0 0 ${MAP_FRAME.width} ${MAP_FRAME.height}`,
-    'aria-hidden': 'true',
-    focusable: 'false',
-  });
+/**
+ * Adds the design's lines. In "datos" mode they are a fallback, removed when data arrives.
+ * @param {SVGSVGElement} svg Lines layer
+ * @param {boolean} fallback Mark them as fallback
+ */
+function addFixedLines(svg, fallback = false) {
   const local = ([x, y]) => `${x - MAP_FRAME.left} ${y - MAP_FRAME.top}`;
   LINES.forEach(([from, control, to, strong], i) => {
     const path = svgEl('path', {
       d: `M${local(from)}Q${local(control)} ${local(to)}`,
       pathLength: '1',
-      class: `comunidad-mapa-line${strong ? ' comunidad-mapa-line-strong' : ''}`,
+      class: `comunidad-mapa-line${strong ? ' comunidad-mapa-line-strong' : ''}${fallback ? ' is-fallback' : ''}`,
     });
     path.style.setProperty('--line-delay', `${(i * 0.3).toFixed(1)}s`);
     svg.append(path);
   });
-  return svg;
 }
 
-function buildMap() {
+/**
+ * Adds the design's dots. In "datos" mode they are a fallback, removed when data arrives.
+ * @param {Element} map Map element
+ * @param {boolean} fallback Mark them as fallback, hidden from assistive technology
+ */
+function addFixedDots(map, fallback = false) {
+  const mark = (wrap) => {
+    if (!fallback) return;
+    wrap.classList.add('is-fallback');
+    wrap.setAttribute('aria-hidden', 'true');
+  };
+  PULSE_DOTS.forEach(({ zone, at, delay }) => {
+    const wrap = el('div', `dot-wrap dot-${zone}`);
+    wrap.style.setProperty('--dd', delay);
+    wrap.append(el('div', 'ring-a'), el('div', 'ring-b'), el('div', 'dot-center'));
+    placeDot(wrap, at);
+    mark(wrap);
+    map.append(wrap);
+  });
+  STATIC_DOTS.forEach(({ zone, at, size }) => {
+    const wrap = el('div', `dot-wrap dot-static dot-${zone}`);
+    wrap.append(el('div', size === 'center' ? 'dot-center' : `dot-${size}`));
+    placeDot(wrap, at);
+    mark(wrap);
+    map.append(wrap);
+  });
+}
+
+/**
+ * Builds the map. With fixed dots the whole map is decorative; in "datos" mode the points are
+ * buttons with a tooltip, so only the image, lines and rings are hidden from assistive tech.
+ * @param {boolean} dataMode Points from the data
+ * @returns {{viewport: Element, map: Element, lines: SVGSVGElement}} Map parts
+ */
+function buildMap(dataMode) {
   const viewport = el('div', 'comunidad-mapa-viewport');
-  viewport.setAttribute('aria-hidden', 'true');
   const map = el('div', 'comunidad-mapa-map');
 
   const img = el('img');
@@ -266,24 +353,70 @@ function buildMap() {
   img.width = 1442;
   img.height = 492;
   img.loading = 'lazy';
-  map.append(img, buildLines());
+  const lines = svgEl('svg', {
+    class: 'comunidad-mapa-lines',
+    viewBox: `0 0 ${MAP_FRAME.width} ${MAP_FRAME.height}`,
+    'aria-hidden': 'true',
+    focusable: 'false',
+  });
+  map.append(img, lines);
 
-  PULSE_DOTS.forEach(({ zone, at, delay }) => {
-    const wrap = el('div', `dot-wrap dot-${zone}`);
-    wrap.style.setProperty('--dd', delay);
-    wrap.append(el('div', 'ring-a'), el('div', 'ring-b'), el('div', 'dot-center'));
-    placeDot(wrap, at);
-    map.append(wrap);
-  });
-  STATIC_DOTS.forEach(({ zone, at, size }) => {
-    const wrap = el('div', `dot-wrap dot-static dot-${zone}`);
-    wrap.append(el('div', size === 'center' ? 'dot-center' : `dot-${size}`));
-    placeDot(wrap, at);
-    map.append(wrap);
-  });
+  if (dataMode) {
+    viewport.classList.add('is-data');
+    img.setAttribute('aria-hidden', 'true');
+    map.setAttribute('role', 'group');
+    map.setAttribute('aria-label', 'Países con más madridistas conectados');
+  } else {
+    viewport.setAttribute('aria-hidden', 'true');
+    addFixedLines(lines);
+    addFixedDots(map);
+  }
 
   viewport.append(map);
-  return viewport;
+  return { viewport, map, lines };
+}
+
+/* Automatic refresh */
+
+/**
+ * Calls refresh every interval, never while the tab is hidden: a refresh that falls due while
+ * hidden runs as soon as the tab is visible again. A failed refresh keeps what is on screen.
+ * @param {number} interval Milliseconds between refreshes
+ * @param {function(): Promise<void>} refresh Refresh function
+ */
+function scheduleRefresh(interval, refresh) {
+  let last = Date.now();
+  let due = false;
+  let running = false;
+  let timer = 0;
+
+  const schedule = () => {
+    clearTimeout(timer);
+    const wait = Math.max(0, interval - (Date.now() - last));
+    timer = setTimeout(() => {
+      // eslint-disable-next-line no-use-before-define
+      if (document.hidden) due = true; else run();
+    }, wait);
+  };
+  const run = async () => {
+    if (running) return;
+    running = true;
+    due = false;
+    last = Date.now();
+    try {
+      await refresh();
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error('comunidad-mapa: refresh failed, keeping the current data', error);
+    }
+    running = false;
+    schedule();
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && (due || Date.now() - last >= interval)) run();
+  });
+  schedule();
 }
 
 /* Text content */
@@ -375,7 +508,8 @@ export default function decorate(block) {
   intro.append(buildTitle(config), subtitle);
 
   const { card, count } = buildLiveCard();
-  const map = buildMap();
+  const dataMode = toKey(config.puntos) === 'datos';
+  const { viewport: map, map: mapInner, lines } = buildMap(dataMode);
   const glow = el('div', 'comunidad-mapa-glow');
   glow.setAttribute('aria-hidden', 'true');
 
@@ -389,5 +523,38 @@ export default function decorate(block) {
   block.replaceChildren(stage);
 
   const revealed = observeReveal([...stage.querySelectorAll('.reveal'), map]);
-  startCounter(count, revealed.get(card), config);
+  const counter = createCounter(count, isOn(config['simular-directo']));
+  const dataLoaded = loadData(config);
+
+  Promise.all([dataLoaded, revealed.get(card)]).then(([{ total }]) => {
+    counter.set(total);
+    counter.start();
+  });
+
+  // "datos" mode: points from the ranking (the design's dots if there is no usable data)
+  let points = null;
+  const pointsReady = dataMode
+    ? Promise.all([import('./comunidad-mapa-points.js'), dataLoaded])
+      .then(([{ default: createPoints }, { rows }]) => {
+        points = createPoints({
+          viewport: map, map: mapInner, lines, maxPoints: parseMax(config['max-puntos']),
+        });
+        if (!rows || !points.update(rows)) throw new Error('No country of the data can be placed');
+      })
+      .catch((error) => {
+        // eslint-disable-next-line no-console
+        console.error('comunidad-mapa: showing the design dots instead of the data', error);
+        addFixedLines(lines, true);
+        addFixedDots(mapInner, true);
+      })
+    : Promise.resolve();
+
+  const minutes = Number(String(config.refresco).replace(',', '.'));
+  if (config.datos && minutes > 0) {
+    pointsReady.then(() => scheduleRefresh(minutes * 60000, async () => {
+      const rows = await fetchRows(config.datos, true);
+      counter.set(sumRows(rows));
+      if (points) points.update(rows);
+    }));
+  }
 }

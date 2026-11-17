@@ -175,6 +175,12 @@ main > .section > .comunidad-mapa-wrapper {
   stroke-dashoffset: 0;
 }
 
+/* Lines added after a data update start undrawn, then draw like the first ones */
+.comunidad-mapa .comunidad-mapa-viewport .comunidad-mapa-line.is-new {
+  stroke-dashoffset: 1;
+  transition: none;
+}
+
 /* Dots: .dot-wrap > .ring-a + .ring-b + .dot-center, scaled with transform */
 .comunidad-mapa .dot-wrap {
   position: absolute;
@@ -237,6 +243,79 @@ main > .section > .comunidad-mapa-wrapper {
   height: 10px;
   background-color: rgb(62 49 250 / 80%);
   box-shadow: 0 0 8px 2px rgb(62 49 250 / 45%);
+}
+
+/* "Datos" mode: points from the data, with tooltip */
+
+/* clip, unlike hidden, cannot be scrolled when a point outside the mobile crop gets focus */
+.comunidad-mapa .comunidad-mapa-viewport.is-data {
+  overflow: clip;
+}
+
+.comunidad-mapa .comunidad-mapa-point {
+  position: absolute;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.4s ease;
+}
+
+.comunidad-mapa .comunidad-mapa-point .dot-wrap {
+  top: 50%;
+  left: 50%;
+}
+
+.comunidad-mapa .comunidad-mapa-point:focus-visible {
+  outline: 2px solid #a39cff;
+  outline-offset: 2px;
+}
+
+.comunidad-mapa .comunidad-mapa-viewport.is-data .dot-wrap {
+  transition: opacity 0.4s ease;
+}
+
+.comunidad-mapa .comunidad-mapa-viewport.is-data .comunidad-mapa-line {
+  transition: stroke-dashoffset 1.2s ease-out var(--line-delay, 0s), opacity 0.4s ease;
+}
+
+.comunidad-mapa .comunidad-mapa-point.is-entering,
+.comunidad-mapa .comunidad-mapa-point.is-leaving,
+.comunidad-mapa .dot-wrap.is-leaving,
+.comunidad-mapa .comunidad-mapa-line.is-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.comunidad-mapa .comunidad-mapa-tooltip {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background-color: #151518;
+  box-shadow: inset 0 0 0 1px var(--comunidad-mapa-border), 0 8px 24px rgb(0 0 0 / 35%);
+  color: var(--comunidad-mapa-text);
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.comunidad-mapa .comunidad-mapa-tooltip[hidden] {
+  display: none;
+}
+
+.comunidad-mapa .comunidad-mapa-tooltip span {
+  color: var(--comunidad-mapa-text-secondary);
 }
 
 /* Phrase and stats */
@@ -547,8 +626,14 @@ main > .section > .comunidad-mapa-wrapper {
     animation: none;
   }
 
-  .comunidad-mapa .comunidad-mapa-line {
+  .comunidad-mapa .comunidad-mapa-line,
+  .comunidad-mapa .comunidad-mapa-viewport.is-data .comunidad-mapa-line {
     stroke-dashoffset: 0;
+    transition: none;
+  }
+
+  .comunidad-mapa .comunidad-mapa-point,
+  .comunidad-mapa .comunidad-mapa-viewport.is-data .dot-wrap {
     transition: none;
   }
 }
