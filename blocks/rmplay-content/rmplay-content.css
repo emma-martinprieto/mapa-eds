@@ -1,0 +1,118 @@
+.rmplay-content .rmplay-content-status {
+  margin: 0;
+  padding: 16px 0;
+  color: var(--dark-color);
+  font-size: var(--body-font-size-s);
+}
+
+.rmplay-content .rmplay-content-row + .rmplay-content-row {
+  margin-top: 32px;
+}
+
+.rmplay-content .rmplay-content-row-title {
+  margin: 0 0 12px;
+  font-size: var(--heading-font-size-s);
+}
+
+/* Mobile: one row with horizontal scroll */
+.rmplay-content .rmplay-content-list {
+  display: grid;
+  grid-auto-columns: 70%;
+  grid-auto-flow: column;
+  gap: 16px;
+  margin: 0;
+  padding: 0 0 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  list-style: none;
+}
+
+.rmplay-content .rmplay-content-list > li {
+  scroll-snap-align: start;
+}
+
+.rmplay-content .rmplay-content-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-color);
+  text-decoration: none;
+}
+
+.rmplay-content .rmplay-content-card:focus-visible {
+  outline: 2px solid var(--link-color);
+  outline-offset: 2px;
+}
+
+.rmplay-content .rmplay-content-media {
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border-radius: 4px;
+  background-color: var(--light-color);
+}
+
+.rmplay-content .rmplay-content-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.2s ease;
+}
+
+.rmplay-content .rmplay-content-card:hover img {
+  transform: scale(1.03);
+}
+
+.rmplay-content .rmplay-content-title {
+  font-size: var(--body-font-size-s);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.rmplay-content .rmplay-content-access {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  margin-top: auto;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background-color: var(--light-color);
+  font-size: var(--body-font-size-xs);
+}
+
+.rmplay-content .rmplay-content-access-denied {
+  background-color: var(--text-color);
+  color: var(--background-color);
+}
+
+.rmplay-content .rmplay-content-access-granted {
+  background-color: var(--link-color);
+  color: var(--background-color);
+}
+
+.rmplay-content .rmplay-content-lock {
+  width: 14px;
+  height: 14px;
+  fill: currentcolor;
+}
+
+/* Desktop: grid */
+@media (width >= 900px) {
+  .rmplay-content .rmplay-content-list {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 24px;
+    padding: 0;
+    overflow-x: visible;
+    scroll-snap-type: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rmplay-content .rmplay-content-media img {
+    transition: none;
+  }
+}
