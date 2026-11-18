@@ -13,6 +13,10 @@ const DEFAULT_ITEMS = 10;
 const MAX_ITEMS = 25; // API limit for rpp
 const ROWS_PER_PAGE = 10; // API limit for bpp
 const MAX_SECTION_PAGES = 5;
+const MAX_TAG_ITEMS = 100; // "Items" with "Tag" can go over one page
+// The API returns tagged videos in no particular order: to show the newest ones, read up to
+// this many pages and sort them by publishedDate
+const MAX_TAG_PAGES = 4;
 // The image host serves resized copies when "original" in the URL is replaced by WIDTHxHEIGHT.
 // It crops from the centre to that exact size, so each field is asked in its own orientation,
 // horizontal ones first: playlists bring a horizontal coverUrl and a portrait smallCoverUrl.
@@ -191,6 +195,42 @@ async function fetchSection(section, items) {
   return rows;
 }
 
+// Newest first by publishedDate; the id (higher is newer) breaks ties and replaces a missing date
+function compareNewest(a, b) {
+  const timeA = Date.parse(a.publishedDate);
+  const timeB = Date.parse(b.publishedDate);
+  const byDate = Number.isFinite(timeA) && Number.isFinite(timeB) ? timeB - timeA : 0;
+  return byDate || (Number(b.id) || 0) - (Number(a.id) || 0);
+}
+
+/**
+ * Fetches the videos of a tag (Get VODs by Tag), following the paging.
+ * @param {string} tag Tag
+ * @param {number} count Number of videos to show
+ * @param {string} order "recientes" (newest first) or "api" (as they arrive)
+ * @returns {Promise<object[]>} The videos
+ */
+async function fetchTag(tag, count, order) {
+  const byApi = order === 'api';
+  const videos = new Map();
+  let lastSeen = '';
+  for (let page = 0; page < (byApi ? Infinity : MAX_TAG_PAGES); page += 1) {
+    const wanted = byApi ? count - videos.size : MAX_ITEMS;
+    const params = new URLSearchParams({ tag, rpp: Math.min(wanted, MAX_ITEMS) });
+    if (lastSeen) params.set('lastSeen', lastSeen);
+    // Pages depend on each other: each request needs the lastSeen of the previous one
+    // eslint-disable-next-line no-await-in-loop
+    const { contentItems = [], paging = {} } = await apiGet(`/api/v4/tagged/vod?${params}`);
+    contentItems.forEach((video) => {
+      if (video && !videos.has(video.id)) videos.set(video.id, video);
+    });
+    if ((byApi && videos.size >= count) || !paging.moreDataAvailable || !paging.lastSeen) break;
+    lastSeen = paging.lastSeen;
+  }
+  const list = [...videos.values()];
+  return (byApi ? list : list.sort(compareNewest)).slice(0, count);
+}
+
 /* Rendering */
 
 function createElement(tag, className, text) {
@@ -339,7 +379,7 @@ function createStatus(text, role) {
 /**
  * Reads the authored configuration. A cell with several paragraphs counts as its first one.
  * @param {Element} block The block element
- * @returns {{bucket: string, section: string, items: number, campaign: string}} Configuration
+ * @returns {object} Configuration: tag, title, order, bucket, section, items, tagItems, campaign
  */
 function getConfig(block) {
   const config = readBlockConfig(block);
@@ -349,20 +389,39 @@ function getConfig(block) {
   };
   const items = Number.parseInt(value('items'), 10);
   return {
+    tag: value('tag'),
+    // readBlockConfig turns "Título" into "t-tulo"
+    title: value('titulo') || value('t-tulo'),
+    order: value('orden').toLowerCase() === 'api' ? 'api' : 'recientes',
     bucket: value('bucket'),
     section: value('section'),
     items: items > 0 ? Math.min(items, MAX_ITEMS) : DEFAULT_ITEMS,
+    tagItems: items > 0 ? Math.min(items, MAX_TAG_ITEMS) : DEFAULT_ITEMS,
     campaign: value('campaign'),
   };
 }
 
-async function loadContent(block, {
-  bucket, section, items, campaign,
+/**
+ * Rows to show. Priority: Tag > Bucket > Section.
+ * @param {object} config Block configuration
+ * @returns {Promise<{rows: object[], limit: number}>} Rows and cards per row
+ */
+async function fetchRows({
+  tag, title, order, bucket, section, items, tagItems,
 }) {
+  if (tag) {
+    const videos = await fetchTag(tag, tagItems, order);
+    return { rows: [{ name: title, contentList: videos }], limit: tagItems };
+  }
+  if (bucket) return { rows: await fetchBucket(bucket, items), limit: items };
+  if (section) return { rows: await fetchSection(section, items), limit: items };
+  throw new Error('Missing "Tag", "Bucket" or "Section" in the block configuration');
+}
+
+async function loadContent(block, config) {
   try {
-    if (!bucket && !section) throw new Error('Missing "Bucket" or "Section" in the block configuration');
-    const rows = bucket ? await fetchBucket(bucket, items) : await fetchSection(section, items);
-    const elements = rows.map((row) => createRow(row, items, campaign)).filter(Boolean);
+    const { rows, limit } = await fetchRows(config);
+    const elements = rows.map((row) => createRow(row, limit, config.campaign)).filter(Boolean);
     block.replaceChildren(...(elements.length
       ? elements
       : [createStatus('No hay contenido disponible en este momento.', 'status')]));
