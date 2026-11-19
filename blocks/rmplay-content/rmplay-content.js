@@ -21,9 +21,9 @@ const DEFAULT_ITEMS = 10;
 const MAX_ITEMS = 25; // API limit for rpp
 const ROWS_PER_PAGE = 10; // API limit for bpp
 const MAX_SECTION_PAGES = 5;
-const MAX_TAG_ITEMS = 100; // "Items" with "Tag" can go over one page
-// The API returns tagged videos in no particular order: to show the newest ones, read up to
-// this many pages and sort them by publishedDate
+const MAX_TAG_ITEMS = 100; // "Items" with "Tag" or "Playlist" can go over one page
+// To show the newest videos of a tag (no particular order) or of a playlist ("Orden |
+// recientes"), read up to this many pages and sort them by publishedDate
 const MAX_TAG_PAGES = 4;
 // The image host serves resized copies when "original" in the URL is replaced by WIDTHxHEIGHT.
 // It crops from the centre to that exact size, so each field is asked in its own orientation,
@@ -181,7 +181,11 @@ function createApiClient(name) {
       const refreshed = await refreshTokens(authorisationToken);
       resp = await request(refreshed.authorisationToken);
     }
-    if (!resp.ok) throw new Error(`GET ${path}: HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const error = new Error(`GET ${path}: HTTP ${resp.status}`);
+      error.status = resp.status;
+      throw error;
+    }
     return resp.json();
   };
 }
@@ -258,6 +262,45 @@ async function fetchTag(apiGet, tag, count, order) {
   }
   const list = [...videos.values()];
   return (byApi ? list : list.sort(compareNewest)).slice(0, count);
+}
+
+/**
+ * Fetches the videos of a playlist, following the paging. A playlist that does not exist
+ * (404) counts as empty.
+ * @param {function(string): Promise<object>} apiGet API client of the environment
+ * @param {string} id Playlist id
+ * @param {number} count Number of videos to show
+ * @param {string} order "playlist" (as the club sorted them) or "recientes" (newest first)
+ * @returns {Promise<{title: string, videos: object[]}>} Playlist title and videos
+ */
+async function fetchPlaylist(apiGet, id, count, order) {
+  const newest = order === 'recientes';
+  const videos = new Map();
+  let title = '';
+  let lastSeen = '';
+  for (let page = 0; page < (newest ? MAX_TAG_PAGES : Infinity); page += 1) {
+    const wanted = newest ? MAX_ITEMS : count - videos.size;
+    const params = new URLSearchParams({ rpp: Math.min(wanted, MAX_ITEMS) });
+    if (lastSeen) params.set('lastSeen', lastSeen);
+    let playlist;
+    try {
+      // Pages depend on each other: each request needs the lastSeen of the previous one
+      // eslint-disable-next-line no-await-in-loop
+      playlist = await apiGet(`/api/v4/playlist/${encodeURIComponent(id)}?${params}`);
+    } catch (error) {
+      if (error.status === 404 && page === 0) return { title: '', videos: [] };
+      throw error;
+    }
+    title = title || playlist.title || '';
+    (playlist.vods || []).forEach((video) => {
+      if (video && !videos.has(video.id)) videos.set(video.id, video);
+    });
+    const { paging = {} } = playlist;
+    if ((!newest && videos.size >= count) || !paging.moreDataAvailable || !paging.lastSeen) break;
+    lastSeen = paging.lastSeen;
+  }
+  const list = [...videos.values()];
+  return { title, videos: (newest ? list.sort(compareNewest) : list).slice(0, count) };
 }
 
 /* Rendering */
@@ -408,8 +451,8 @@ function createStatus(text, role) {
 /**
  * Reads the authored configuration. A cell with several paragraphs counts as its first one.
  * @param {Element} block The block element
- * @returns {object} Configuration: environment, tag, title, order, bucket, section, items,
- *   tagItems, campaign
+ * @returns {object} Configuration: environment, playlist, tag, title, order, playlistOrder,
+ *   bucket, section, items, tagItems, campaign
  */
 function getConfig(block) {
   const config = readBlockConfig(block);
@@ -418,14 +461,21 @@ function getConfig(block) {
     return (raw || '').trim();
   };
   const items = Number.parseInt(value('items'), 10);
+  // The id, or the number at the end of an RM Play playlist URL
+  const playlist = value('playlist');
+  const playlistId = (playlist.match(/playlist\/(\d+)/) || playlist.match(/^(\d+)$/) || [])[1] || '';
   // "produccion" or "producción"; anything else is staging
-  const environment = value('entorno').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const environment = value('entorno').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   return {
     environment: ENVIRONMENTS[environment] ? environment : DEFAULT_ENVIRONMENT,
+    playlist,
+    playlistId,
     tag: value('tag'),
     // readBlockConfig turns "Título" into "t-tulo"
     title: value('titulo') || value('t-tulo'),
     order: value('orden').toLowerCase() === 'api' ? 'api' : 'recientes',
+    // With "Playlist" the default is the playlist's own order
+    playlistOrder: value('orden').toLowerCase() === 'recientes' ? 'recientes' : 'playlist',
     bucket: value('bucket'),
     section: value('section'),
     items: items > 0 ? Math.min(items, MAX_ITEMS) : DEFAULT_ITEMS,
@@ -435,21 +485,27 @@ function getConfig(block) {
 }
 
 /**
- * Rows to show. Priority: Tag > Bucket > Section.
+ * Rows to show. Priority: Playlist > Tag > Bucket > Section.
  * @param {object} config Block configuration
  * @returns {Promise<{rows: object[], limit: number}>} Rows and cards per row
  */
 async function fetchRows({
-  environment, tag, title, order, bucket, section, items, tagItems,
+  environment, playlist, playlistId, playlistOrder, tag, title, order, bucket, section, items,
+  tagItems,
 }) {
   const apiGet = getApiClient(environment);
+  if (playlist) {
+    if (!playlistId) throw new Error(`"Playlist" is not an id or an RM Play playlist URL: ${playlist}`);
+    const list = await fetchPlaylist(apiGet, playlistId, tagItems, playlistOrder);
+    return { rows: [{ name: title || list.title, contentList: list.videos }], limit: tagItems };
+  }
   if (tag) {
     const videos = await fetchTag(apiGet, tag, tagItems, order);
     return { rows: [{ name: title, contentList: videos }], limit: tagItems };
   }
   if (bucket) return { rows: await fetchBucket(apiGet, bucket, items), limit: items };
   if (section) return { rows: await fetchSection(apiGet, section, items), limit: items };
-  throw new Error('Missing "Tag", "Bucket" or "Section" in the block configuration');
+  throw new Error('Missing "Playlist", "Tag", "Bucket" or "Section" in the block configuration');
 }
 
 async function loadContent(block, config) {
