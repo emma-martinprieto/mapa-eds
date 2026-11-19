@@ -23,7 +23,7 @@ const ROWS_PER_PAGE = 10; // API limit for bpp
 const MAX_SECTION_PAGES = 5;
 const MAX_TAG_ITEMS = 100; // "Items" with "Tag" or "Playlist" can go over one page
 // To show the newest videos of a tag (no particular order) or of a playlist ("Orden |
-// recientes"), read up to this many pages and sort them by publishedDate
+// recientes", the default), read up to this many pages and sort them by publishedDate
 const MAX_TAG_PAGES = 4;
 // The image host serves resized copies when "original" in the URL is replaced by WIDTHxHEIGHT.
 // It crops from the centre to that exact size, so each field is asked in its own orientation,
@@ -264,13 +264,25 @@ async function fetchTag(apiGet, tag, count, order) {
   return (byApi ? list : list.sort(compareNewest)).slice(0, count);
 }
 
+// Playlist videos, newest first by publishedDate (the id breaks ties). Videos without a date go
+// last, in the playlist's order (the sort is stable).
+function comparePlaylistNewest(a, b) {
+  const timeA = Date.parse(a.publishedDate);
+  const timeB = Date.parse(b.publishedDate);
+  const datedA = Number.isFinite(timeA);
+  const datedB = Number.isFinite(timeB);
+  if (!datedA || !datedB) return Number(datedB) - Number(datedA);
+  return timeB - timeA || (Number(b.id) || 0) - (Number(a.id) || 0);
+}
+
 /**
  * Fetches the videos of a playlist, following the paging. A playlist that does not exist
  * (404) counts as empty.
  * @param {function(string): Promise<object>} apiGet API client of the environment
  * @param {string} id Playlist id
  * @param {number} count Number of videos to show
- * @param {string} order "playlist" (as the club sorted them) or "recientes" (newest first)
+ * @param {string} order "recientes" (newest first, the default) or "playlist" (as the club
+ *   sorted them)
  * @returns {Promise<{title: string, videos: object[]}>} Playlist title and videos
  */
 async function fetchPlaylist(apiGet, id, count, order) {
@@ -300,7 +312,7 @@ async function fetchPlaylist(apiGet, id, count, order) {
     lastSeen = paging.lastSeen;
   }
   const list = [...videos.values()];
-  return { title, videos: (newest ? list.sort(compareNewest) : list).slice(0, count) };
+  return { title, videos: (newest ? list.sort(comparePlaylistNewest) : list).slice(0, count) };
 }
 
 /* Rendering */
@@ -474,8 +486,8 @@ function getConfig(block) {
     // readBlockConfig turns "Título" into "t-tulo"
     title: value('titulo') || value('t-tulo'),
     order: value('orden').toLowerCase() === 'api' ? 'api' : 'recientes',
-    // With "Playlist" the default is the playlist's own order
-    playlistOrder: value('orden').toLowerCase() === 'recientes' ? 'recientes' : 'playlist',
+    // With "Playlist" the default is newest first; "Orden | playlist" keeps the club's order
+    playlistOrder: value('orden').toLowerCase() === 'playlist' ? 'playlist' : 'recientes',
     bucket: value('bucket'),
     section: value('section'),
     items: items > 0 ? Math.min(items, MAX_ITEMS) : DEFAULT_ITEMS,
