@@ -1,13 +1,21 @@
 import { readBlockConfig } from '../../scripts/aem.js';
 
-// Vesper Front Office API (Deltatre). Staging values: change both for production.
-const API_BASE_URL = 'https://realmadrid.api.onvesper-staging.com';
-const API_KEY = '16d40380-cf6c-4b9a-99e4-64082887e08d';
+// Vesper Front Office API (Deltatre), per environment. Each table picks one with "Entorno".
+const API_STAGING_BASE_URL = 'https://realmadrid.api.onvesper-staging.com';
+const API_STAGING_KEY = '16d40380-cf6c-4b9a-99e4-64082887e08d';
+const API_PRODUCTION_BASE_URL = 'https://realmadrid.api.onvesper.com';
+const API_PRODUCTION_KEY = '2f10285b-8c33-4bab-aa75-4c49f2e6c2ba';
 const API_REALM = 'dce.realmadrid';
 const API_APP = 'vesper';
+const ENVIRONMENTS = {
+  staging: { baseUrl: API_STAGING_BASE_URL, key: API_STAGING_KEY },
+  produccion: { baseUrl: API_PRODUCTION_BASE_URL, key: API_PRODUCTION_KEY },
+};
+const DEFAULT_ENVIRONMENT = 'staging';
 
 const RMPLAY_URL = 'https://play.realmadrid.com';
-const TOKEN_STORAGE_KEY = 'rmplay.guest';
+// Guest tokens are stored per environment: rmplay.guest.staging, rmplay.guest.produccion
+const TOKEN_STORAGE_PREFIX = 'rmplay.guest';
 const DEFAULT_LANG = 'es';
 const DEFAULT_ITEMS = 10;
 const MAX_ITEMS = 25; // API limit for rpp
@@ -42,142 +50,162 @@ const ICON_PATHS = {
 };
 const UTM_PARAMS = { utm_source: 'realmadrid.com', utm_medium: 'landing' };
 
-/* Guest tokens, shared by every rmplay-content block on the page */
+/* Guest tokens: one client per environment, shared by the blocks of that environment */
 
-let tokens = null;
-let checkinPromise = null;
-let refreshPromise = null;
+/**
+ * Creates the API client of an environment, with its own guest tokens, check-in and refresh.
+ * @param {string} name Environment name (key of ENVIRONMENTS)
+ * @returns {function(string): Promise<object>} GET function for that environment
+ */
+function createApiClient(name) {
+  const { baseUrl, key } = ENVIRONMENTS[name];
+  const storageKey = `${TOKEN_STORAGE_PREFIX}.${name}`;
+  let tokens = null;
+  let checkinPromise = null;
+  let refreshPromise = null;
 
-function readStoredTokens() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(TOKEN_STORAGE_KEY));
-    if (stored && stored.authorisationToken && stored.refreshToken) return stored;
-  } catch {
-    // Storage blocked or corrupted: tokens then live only in memory
+  function readStoredTokens() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(storageKey));
+      if (stored && stored.authorisationToken && stored.refreshToken) return stored;
+    } catch {
+      // Storage blocked or corrupted: tokens then live only in memory
+    }
+    return null;
   }
-  return null;
-}
 
-function storeTokens(newTokens) {
-  tokens = newTokens;
-  try {
-    if (newTokens) localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(newTokens));
-    else localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch {
-    // Storage blocked: keep the tokens in memory only
+  function storeTokens(newTokens) {
+    tokens = newTokens;
+    try {
+      if (newTokens) localStorage.setItem(storageKey, JSON.stringify(newTokens));
+      else localStorage.removeItem(storageKey);
+    } catch {
+      // Storage blocked: keep the tokens in memory only
+    }
+    return newTokens;
   }
-  return newTokens;
-}
 
-function apiHeaders(extra = {}) {
-  return {
-    Realm: API_REALM,
-    app: API_APP,
-    'x-api-key': API_KEY,
-    'Accept-Language': document.documentElement.lang || DEFAULT_LANG,
-    ...extra,
+  function apiHeaders(extra = {}) {
+    return {
+      Realm: API_REALM,
+      app: API_APP,
+      'x-api-key': key,
+      'Accept-Language': document.documentElement.lang || DEFAULT_LANG,
+      ...extra,
+    };
+  }
+
+  function guestCheckin() {
+    if (!checkinPromise) {
+      checkinPromise = (async () => {
+        const resp = await fetch(`${baseUrl}/api/v2/login/guest/checkin`, {
+          method: 'POST',
+          headers: apiHeaders(),
+        });
+        if (!resp.ok) throw new Error(`Guest check-in: HTTP ${resp.status}`);
+        const { authorisationToken, refreshToken } = await resp.json();
+        return storeTokens({ authorisationToken, refreshToken });
+      })().finally(() => {
+        checkinPromise = null;
+      });
+    }
+    return checkinPromise;
+  }
+
+  async function getTokens() {
+    if (refreshPromise) return refreshPromise;
+    if (!tokens) tokens = readStoredTokens();
+    return tokens || guestCheckin();
+  }
+
+  /**
+   * Gets new tokens after a 401. Every request that failed with the same token waits for a
+   * single refresh call. The token is never refreshed before a 401: the API answers 429.
+   * @param {string} expiredToken Authorisation token that got the 401
+   * @returns {Promise<{authorisationToken: string, refreshToken: string}>} Valid tokens
+   */
+  function refreshTokens(expiredToken) {
+    if (refreshPromise) return refreshPromise;
+
+    // Another request, or another tab, may have replaced the expired token already
+    const current = readStoredTokens() || tokens;
+    if (!current) return guestCheckin();
+    if (current.authorisationToken !== expiredToken) {
+      tokens = current;
+      return Promise.resolve(current);
+    }
+
+    refreshPromise = (async () => {
+      const resp = await fetch(`${baseUrl}/api/v2/token/refresh`, {
+        method: 'POST',
+        headers: apiHeaders({
+          Authorization: `Bearer ${expiredToken}`,
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify({ refreshToken: current.refreshToken }),
+      });
+      if (resp.status === 403 || resp.status === 404) {
+        storeTokens(null);
+        return guestCheckin();
+      }
+      if (!resp.ok) {
+        // Unusable tokens (for example 400 when they are corrupted): the next load checks in
+        // again
+        storeTokens(null);
+        throw new Error(`Token refresh: HTTP ${resp.status}`);
+      }
+      const { authorisationToken, refreshToken } = await resp.json();
+      return storeTokens({
+        authorisationToken,
+        refreshToken: refreshToken || current.refreshToken,
+      });
+    })().finally(() => {
+      refreshPromise = null;
+    });
+    return refreshPromise;
+  }
+
+  /**
+   * GET request to the API with the guest token, retried once after refreshing it on a 401.
+   * @param {string} path Path and query string
+   * @returns {Promise<object>} Response body
+   */
+  return async function apiGet(path) {
+    const request = (token) => fetch(`${baseUrl}${path}`, {
+      headers: apiHeaders({ Authorization: `Bearer ${token}` }),
+    });
+
+    const { authorisationToken } = await getTokens();
+    let resp = await request(authorisationToken);
+    if (resp.status === 401) {
+      const refreshed = await refreshTokens(authorisationToken);
+      resp = await request(refreshed.authorisationToken);
+    }
+    if (!resp.ok) throw new Error(`GET ${path}: HTTP ${resp.status}`);
+    return resp.json();
   };
 }
 
-function guestCheckin() {
-  if (!checkinPromise) {
-    checkinPromise = (async () => {
-      const resp = await fetch(`${API_BASE_URL}/api/v2/login/guest/checkin`, {
-        method: 'POST',
-        headers: apiHeaders(),
-      });
-      if (!resp.ok) throw new Error(`Guest check-in: HTTP ${resp.status}`);
-      const { authorisationToken, refreshToken } = await resp.json();
-      return storeTokens({ authorisationToken, refreshToken });
-    })().finally(() => {
-      checkinPromise = null;
-    });
-  }
-  return checkinPromise;
-}
-
-async function getTokens() {
-  if (refreshPromise) return refreshPromise;
-  if (!tokens) tokens = readStoredTokens();
-  return tokens || guestCheckin();
-}
-
-/**
- * Gets new tokens after a 401. Every request that failed with the same token waits for a
- * single refresh call. The token is never refreshed before a 401: the API answers 429.
- * @param {string} expiredToken Authorisation token that got the 401
- * @returns {Promise<{authorisationToken: string, refreshToken: string}>} Valid tokens
- */
-function refreshTokens(expiredToken) {
-  if (refreshPromise) return refreshPromise;
-
-  // Another request, or another tab, may have replaced the expired token already
-  const current = readStoredTokens() || tokens;
-  if (!current) return guestCheckin();
-  if (current.authorisationToken !== expiredToken) {
-    tokens = current;
-    return Promise.resolve(current);
-  }
-
-  refreshPromise = (async () => {
-    const resp = await fetch(`${API_BASE_URL}/api/v2/token/refresh`, {
-      method: 'POST',
-      headers: apiHeaders({
-        Authorization: `Bearer ${expiredToken}`,
-        'Content-Type': 'application/json',
-      }),
-      body: JSON.stringify({ refreshToken: current.refreshToken }),
-    });
-    if (resp.status === 403 || resp.status === 404) {
-      storeTokens(null);
-      return guestCheckin();
-    }
-    if (!resp.ok) {
-      // Unusable tokens (for example 400 when they are corrupted): the next load checks in again
-      storeTokens(null);
-      throw new Error(`Token refresh: HTTP ${resp.status}`);
-    }
-    const { authorisationToken, refreshToken } = await resp.json();
-    return storeTokens({ authorisationToken, refreshToken: refreshToken || current.refreshToken });
-  })().finally(() => {
-    refreshPromise = null;
-  });
-  return refreshPromise;
-}
-
-/**
- * GET request to the API with the guest token, retried once after refreshing it on a 401.
- * @param {string} path Path and query string
- * @returns {Promise<object>} Response body
- */
-async function apiGet(path) {
-  const request = (token) => fetch(`${API_BASE_URL}${path}`, {
-    headers: apiHeaders({ Authorization: `Bearer ${token}` }),
-  });
-
-  const { authorisationToken } = await getTokens();
-  let resp = await request(authorisationToken);
-  if (resp.status === 401) {
-    const refreshed = await refreshTokens(authorisationToken);
-    resp = await request(refreshed.authorisationToken);
-  }
-  if (!resp.ok) throw new Error(`GET ${path}: HTTP ${resp.status}`);
-  return resp.json();
+const apiClients = new Map();
+function getApiClient(name) {
+  if (!apiClients.has(name)) apiClients.set(name, createApiClient(name));
+  return apiClients.get(name);
 }
 
 /* Content */
 
-async function fetchBucket(exid, items) {
+async function fetchBucket(apiGet, exid, items) {
   return [await apiGet(`/api/v4/content/bucket/${encodeURIComponent(exid)}?rpp=${items}`)];
 }
 
 /**
  * Fetches every row of a section, following the API paging (10 rows per page at most).
+ * @param {function(string): Promise<object>} apiGet API client of the environment
  * @param {string} section Section name
  * @param {number} items Cards per row
  * @returns {Promise<object[]>} The rows
  */
-async function fetchSection(section, items) {
+async function fetchSection(apiGet, section, items) {
   const rows = [];
   let lastSeen = '';
   let page = 0;
@@ -205,12 +233,13 @@ function compareNewest(a, b) {
 
 /**
  * Fetches the videos of a tag (Get VODs by Tag), following the paging.
+ * @param {function(string): Promise<object>} apiGet API client of the environment
  * @param {string} tag Tag
  * @param {number} count Number of videos to show
  * @param {string} order "recientes" (newest first) or "api" (as they arrive)
  * @returns {Promise<object[]>} The videos
  */
-async function fetchTag(tag, count, order) {
+async function fetchTag(apiGet, tag, count, order) {
   const byApi = order === 'api';
   const videos = new Map();
   let lastSeen = '';
@@ -379,7 +408,8 @@ function createStatus(text, role) {
 /**
  * Reads the authored configuration. A cell with several paragraphs counts as its first one.
  * @param {Element} block The block element
- * @returns {object} Configuration: tag, title, order, bucket, section, items, tagItems, campaign
+ * @returns {object} Configuration: environment, tag, title, order, bucket, section, items,
+ *   tagItems, campaign
  */
 function getConfig(block) {
   const config = readBlockConfig(block);
@@ -388,7 +418,10 @@ function getConfig(block) {
     return (raw || '').trim();
   };
   const items = Number.parseInt(value('items'), 10);
+  // "produccion" or "producción"; anything else is staging
+  const environment = value('entorno').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   return {
+    environment: ENVIRONMENTS[environment] ? environment : DEFAULT_ENVIRONMENT,
     tag: value('tag'),
     // readBlockConfig turns "Título" into "t-tulo"
     title: value('titulo') || value('t-tulo'),
@@ -407,14 +440,15 @@ function getConfig(block) {
  * @returns {Promise<{rows: object[], limit: number}>} Rows and cards per row
  */
 async function fetchRows({
-  tag, title, order, bucket, section, items, tagItems,
+  environment, tag, title, order, bucket, section, items, tagItems,
 }) {
+  const apiGet = getApiClient(environment);
   if (tag) {
-    const videos = await fetchTag(tag, tagItems, order);
+    const videos = await fetchTag(apiGet, tag, tagItems, order);
     return { rows: [{ name: title, contentList: videos }], limit: tagItems };
   }
-  if (bucket) return { rows: await fetchBucket(bucket, items), limit: items };
-  if (section) return { rows: await fetchSection(section, items), limit: items };
+  if (bucket) return { rows: await fetchBucket(apiGet, bucket, items), limit: items };
+  if (section) return { rows: await fetchSection(apiGet, section, items), limit: items };
   throw new Error('Missing "Tag", "Bucket" or "Section" in the block configuration');
 }
 
