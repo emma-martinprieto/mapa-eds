@@ -98,6 +98,17 @@ footer .footer[data-block-status="loaded"] {
   visibility: visible;
 }
 
+/* Pages with "header | off" or "footer | off" in their metadata: no header or footer, and no
+   space kept for them */
+body.no-header {
+  --nav-height: 0px;
+}
+
+body.no-header > header,
+body.no-footer > footer {
+  display: none;
+}
+
 h1,
 h2,
 h3,

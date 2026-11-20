@@ -10,7 +10,15 @@ import {
   loadSections,
   loadCSS,
   buildBlock,
+  getMetadata,
 } from './aem.js';
+
+/**
+ * Whether a page metadata switch is "off" (for example "header | off" in the metadata block).
+ * @param {string} name Metadata name
+ * @returns {boolean} True when the value is "off"
+ */
+const isOff = (name) => getMetadata(name).trim().toLowerCase() === 'off';
 
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
   const innerTT = window.trustedTypes.createPolicy('tt-inner', {
@@ -162,6 +170,9 @@ export function decorateMain(main) {
 async function loadEager(doc) {
   document.documentElement.lang = 'es';
   decorateTemplateAndTheme();
+  // Before the body appears, so no space is reserved for a header or footer the page hides
+  document.body.classList.toggle('no-header', isOff('header'));
+  document.body.classList.toggle('no-footer', isOff('footer'));
   const main = doc.querySelector('main');
   if (main) {
     decorateMain(main);
@@ -184,7 +195,7 @@ async function loadEager(doc) {
  * @param {Element} doc The container element
  */
 async function loadLazy(doc) {
-  loadHeader(doc.querySelector('body > header'));
+  if (!document.body.classList.contains('no-header')) loadHeader(doc.querySelector('body > header'));
 
   const main = doc.querySelector('main');
   await loadSections(main);
@@ -193,7 +204,7 @@ async function loadLazy(doc) {
   const element = hash ? doc.getElementById(hash.substring(1)) : false;
   if (hash && element) element.scrollIntoView();
 
-  loadFooter(doc.querySelector('body > footer'));
+  if (!document.body.classList.contains('no-footer')) loadFooter(doc.querySelector('body > footer'));
 
   loadCSS(`${window.hlx.codeBasePath}/styles/lazy-styles.css`);
   loadFonts();
