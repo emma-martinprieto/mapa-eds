@@ -109,6 +109,13 @@ body.no-footer > footer {
   display: none;
 }
 
+/* With both off only the content shows: the page background is as dark as the comunidad-mapa
+   block, so no white shows below short content (sections lose their spacing further down) */
+html:has(> body.no-header.no-footer),
+body.no-header.no-footer {
+  background-color: #0a0a0a;
+}
+
 h1,
 h2,
 h3,
@@ -333,4 +340,10 @@ main .section.highlight {
   background-color: var(--light-color);
   margin: 0;
   padding: 40px 0;
+}
+
+/* Pages with "header | off" and "footer | off": sections without margin or padding */
+body.no-header.no-footer main > .section {
+  margin: 0;
+  padding: 0;
 }
