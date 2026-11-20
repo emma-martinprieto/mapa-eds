@@ -1,7 +1,7 @@
 /*
  * comunidad-mapa "datos" mode: one point per country of the ranking. The first four pulse
- * (ring-a + ring-b + dot-center), the rest are static. Each point is a button with a tooltip
- * (country name and active users); lines go from Madrid to the first countries of the ranking.
+ * (ring-a + ring-b + dot-center), the rest are static. Points are decorative, as in the design
+ * (aria-hidden, not interactive); lines go from Madrid to the first countries of the ranking.
  */
 import { countryPosition, toMapPercent } from './comunidad-mapa-geo.js';
 
@@ -11,8 +11,6 @@ const PULSE_CYCLE = 7;
 const FADE_DURATION = 400;
 const LINE_STAGGER = 0.3;
 const MADRID = [40.4, -3.7];
-const TOOLTIP_GAP = 8;
-const EDGE_GAP = 4;
 const RESIZE_DELAY = 200;
 
 /* Line curves */
@@ -86,7 +84,6 @@ function chooseCurve(from, to, obstacles, others) {
 }
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const formatUsers = (value) => Math.round(value).toLocaleString('es-ES');
 
 function el(tag, className, text) {
   const element = document.createElement(tag);
@@ -102,7 +99,6 @@ function nextFrame(callback) {
 function fadeOut(element) {
   element.classList.add('is-leaving');
   element.setAttribute('aria-hidden', 'true');
-  element.setAttribute('tabindex', '-1');
   setTimeout(() => element.remove(), reducedMotion() ? 0 : FADE_DURATION);
 }
 
@@ -136,7 +132,6 @@ function rank(rows, maxPoints) {
 /**
  * Creates the "datos" mode controller.
  * @param {object} parts Map parts
- * @param {Element} parts.viewport Map viewport (holds the tooltip)
  * @param {Element} parts.map Map element (holds the points)
  * @param {SVGSVGElement} parts.lines Lines layer
  * @param {number} parts.maxPoints Maximum number of points
@@ -146,86 +141,10 @@ function rank(rows, maxPoints) {
  * @returns {{update: function(object[]): number}} Updates the points; returns how many it shows
  */
 export default function createPoints({
-  viewport, map, lines, maxPoints, maxLines, obstacles,
+  map, lines, maxPoints, maxLines, obstacles,
 }) {
   const startTime = performance.now();
-  const lang = document.documentElement.lang || 'es';
-  let displayNames = null;
-  try {
-    displayNames = new Intl.DisplayNames([lang, 'es'], { type: 'region' });
-  } catch {
-    // Without Intl.DisplayNames the code is shown
-  }
-  const nameOf = (code) => {
-    try {
-      return (displayNames && displayNames.of(code)) || code;
-    } catch {
-      return code;
-    }
-  };
-
   const points = new Map();
-  let active = null;
-
-  /* Tooltip */
-  const tooltip = el('div', 'comunidad-mapa-tooltip');
-  tooltip.setAttribute('aria-hidden', 'true');
-  tooltip.hidden = true;
-  const tooltipName = el('strong');
-  const tooltipValue = el('span');
-  tooltip.append(tooltipName, tooltipValue);
-  viewport.append(tooltip);
-
-  const hide = () => {
-    tooltip.hidden = true;
-    active = null;
-  };
-
-  const show = (button) => {
-    const point = points.get(button.dataset.code);
-    if (!point || point.button !== button) return;
-    active = button;
-    tooltipName.textContent = nameOf(point.entry.code);
-    tooltipValue.textContent = `${formatUsers(point.entry.value)} usuarios activos`;
-    tooltip.hidden = false;
-
-    const area = viewport.getBoundingClientRect();
-    const dot = button.getBoundingClientRect();
-    const half = tooltip.offsetWidth / 2;
-    const x = dot.left + dot.width / 2 - area.left;
-    const above = dot.top - area.top - tooltip.offsetHeight - TOOLTIP_GAP;
-    const top = above >= 0 ? above : dot.bottom - area.top + TOOLTIP_GAP;
-    const left = Math.min(Math.max(x, half + EDGE_GAP), area.width - half - EDGE_GAP);
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-  };
-
-  const pointOf = (target) => (target instanceof Element
-    ? target.closest('.comunidad-mapa-point')
-    : null);
-  map.addEventListener('pointerover', (event) => {
-    const button = pointOf(event.target);
-    if (button && event.pointerType !== 'touch') show(button);
-  });
-  map.addEventListener('pointerout', (event) => {
-    const button = pointOf(event.target);
-    const leftPoint = button && !button.contains(event.relatedTarget);
-    if (leftPoint && document.activeElement !== button) hide();
-  });
-  map.addEventListener('focusin', (event) => {
-    const button = pointOf(event.target);
-    if (button) show(button);
-  });
-  map.addEventListener('focusout', hide);
-  map.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') hide();
-  });
-  // Touch: a tap shows the tooltip; a tap anywhere else hides it
-  document.addEventListener('click', (event) => {
-    const button = pointOf(event.target);
-    if (button && map.contains(button)) show(button);
-    else if (active) hide();
-  });
 
   /* Points */
 
@@ -235,27 +154,21 @@ export default function createPoints({
     return `${((((delay - elapsed) % PULSE_CYCLE) + PULSE_CYCLE) % PULSE_CYCLE) - PULSE_CYCLE}s`;
   };
 
-  const label = (button, { code, value }) => {
-    button.setAttribute('aria-label', `${nameOf(code)}: ${formatUsers(value)} usuarios activos`);
-  };
-
   const createPoint = (entry) => {
-    const button = el('button', `comunidad-mapa-point${entry.pulse ? ' is-pulse' : ''} is-entering`);
-    button.type = 'button';
-    button.dataset.code = entry.code;
-    button.style.left = `${entry.position[0].toFixed(2)}%`;
-    button.style.top = `${entry.position[1].toFixed(2)}%`;
-    label(button, entry);
+    const point = el('span', `comunidad-mapa-point${entry.pulse ? ' is-pulse' : ''} is-entering`);
+    point.setAttribute('aria-hidden', 'true');
+    point.dataset.code = entry.code;
+    point.style.left = `${entry.position[0].toFixed(2)}%`;
+    point.style.top = `${entry.position[1].toFixed(2)}%`;
 
     const wrap = el('span', `dot-wrap${entry.pulse ? '' : ' dot-static'}`);
-    wrap.setAttribute('aria-hidden', 'true');
     if (entry.pulse) {
       wrap.style.setProperty('--dd', phase(entry.delay));
       wrap.append(el('span', 'ring-a'), el('span', 'ring-b'));
     }
     wrap.append(el('span', 'dot-center'));
-    button.append(wrap);
-    return button;
+    point.append(wrap);
+    return point;
   };
 
   /* Lines from Madrid to the first countries of the ranking (Spain excluded) */
@@ -352,8 +265,7 @@ export default function createPoints({
       points.forEach((point, code) => {
         const entry = next.get(code);
         if (entry && entry.pulse === point.entry.pulse && entry.delay === point.entry.delay) return;
-        if (active === point.button) hide();
-        fadeOut(point.button);
+        fadeOut(point.element);
         points.delete(code);
       });
 
@@ -362,16 +274,14 @@ export default function createPoints({
         const point = points.get(entry.code);
         if (point) {
           point.entry = entry;
-          label(point.button, entry);
-          if (active === point.button) show(point.button);
           return;
         }
-        const button = createPoint(entry);
-        points.set(entry.code, { button, entry });
-        map.append(button);
-        added.push(button);
+        const element = createPoint(entry);
+        points.set(entry.code, { element, entry });
+        map.append(element);
+        added.push(element);
       });
-      nextFrame(() => added.forEach((button) => button.classList.remove('is-entering')));
+      nextFrame(() => added.forEach((element) => element.classList.remove('is-entering')));
 
       updateLines(ranking);
       return ranking.length;

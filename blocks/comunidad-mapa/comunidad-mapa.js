@@ -345,13 +345,14 @@ function addFixedDots(map, fallback = false) {
 }
 
 /**
- * Builds the map. With fixed dots the whole map is decorative; in "datos" mode the points are
- * buttons with a tooltip, so only the image, lines and rings are hidden from assistive tech.
+ * Builds the map. It is decorative in both modes, as in the design: hidden from assistive tech
+ * and not interactive.
  * @param {boolean} dataMode Points from the data
  * @returns {{viewport: Element, map: Element, lines: SVGSVGElement}} Map parts
  */
 function buildMap(dataMode) {
   const viewport = el('div', 'comunidad-mapa-viewport');
+  viewport.setAttribute('aria-hidden', 'true');
   const map = el('div', 'comunidad-mapa-map');
 
   const img = el('img');
@@ -370,11 +371,7 @@ function buildMap(dataMode) {
 
   if (dataMode) {
     viewport.classList.add('is-data');
-    img.setAttribute('aria-hidden', 'true');
-    map.setAttribute('role', 'group');
-    map.setAttribute('aria-label', 'Países con más madridistas conectados');
   } else {
-    viewport.setAttribute('aria-hidden', 'true');
     addFixedLines(lines);
     addFixedDots(map);
   }
@@ -545,7 +542,6 @@ export default function decorate(block) {
     ? Promise.all([import('./comunidad-mapa-points.js'), dataLoaded])
       .then(([{ default: createPoints }, { rows }]) => {
         points = createPoints({
-          viewport: map,
           map: mapInner,
           lines,
           maxPoints: parseMax(config['max-puntos']),

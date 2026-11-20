@@ -245,10 +245,9 @@ main > .section > .comunidad-mapa-wrapper {
   box-shadow: 0 0 8px 2px rgb(62 49 250 / 45%);
 }
 
-/* "Datos" mode: points from the data, with tooltip */
+/* "Datos" mode: points from the data, decorative as in the design */
 
-/* clip, unlike hidden, cannot be scrolled when a point outside the mobile crop gets focus.
-   z-index 0 keeps the points and lines under the live card and the title. */
+/* z-index 0 keeps the points and lines under the live card and the title */
 .comunidad-mapa .comunidad-mapa-viewport.is-data {
   z-index: 0;
   overflow: clip;
@@ -259,24 +258,14 @@ main > .section > .comunidad-mapa-wrapper {
   z-index: 1;
   width: 24px;
   height: 24px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: none;
-  cursor: pointer;
   transform: translate(-50%, -50%);
   transition: opacity 0.4s ease;
+  pointer-events: none;
 }
 
 .comunidad-mapa .comunidad-mapa-point .dot-wrap {
   top: 50%;
   left: 50%;
-}
-
-.comunidad-mapa .comunidad-mapa-point:focus-visible {
-  outline: 2px solid #a39cff;
-  outline-offset: 2px;
 }
 
 .comunidad-mapa .comunidad-mapa-viewport.is-data .dot-wrap {
@@ -293,31 +282,6 @@ main > .section > .comunidad-mapa-wrapper {
 .comunidad-mapa .comunidad-mapa-line.is-leaving {
   opacity: 0;
   pointer-events: none;
-}
-
-.comunidad-mapa .comunidad-mapa-tooltip {
-  position: absolute;
-  z-index: 3;
-  display: flex;
-  flex-direction: column;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background-color: #151518;
-  box-shadow: inset 0 0 0 1px var(--comunidad-mapa-border), 0 8px 24px rgb(0 0 0 / 35%);
-  color: var(--comunidad-mapa-text);
-  font-size: 13px;
-  line-height: 1.35;
-  white-space: nowrap;
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-
-.comunidad-mapa .comunidad-mapa-tooltip[hidden] {
-  display: none;
-}
-
-.comunidad-mapa .comunidad-mapa-tooltip span {
-  color: var(--comunidad-mapa-text-secondary);
 }
 
 /* Phrase and stats */
